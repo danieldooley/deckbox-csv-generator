@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	cardInputRegex = `^(\d+)(f?)$`
+	cardInputRegex = `^(?:([0-9a-z]{3})\.)?(\d+)(f?)$`
 )
 
 var (
@@ -137,15 +137,25 @@ func (a *app) start() error {
 
 	cardField.SetDoneFunc(func(key tcell.Key) {
 		if key == tcell.KeyEnter {
-			s := strings.TrimSpace(cardField.GetText())
+			s := strings.ToLower(strings.TrimSpace(cardField.GetText()))
 
 			matches := cardInputRegexEval.FindStringSubmatch(s)
 
-			if len(matches) == 3 {
-				cardNum := matches[1]
-				foil := matches[2] == "f"
+			if len(matches) == 4 {
+				cardSet := matches[1]
+				cardNum := matches[2]
+				foil := matches[3] == "f"
 
-				card, ok := a.store.SetCards[a.selectedSet][cardNum]
+				// Trim leading zeroes from the card number
+				cardNum = strings.TrimLeft(cardNum, "0")
+
+				// Prefer the set code from the card input
+				selectedSet := a.selectedSet
+				if cardSet != "" {
+					selectedSet = cardSet
+				}
+
+				card, ok := a.store.SetCards[selectedSet][cardNum]
 				if !ok {
 					a.beep(1)
 					return
@@ -176,14 +186,14 @@ func (a *app) start() error {
 				// Find if card has already been added
 				index := -1
 				sCard := deckbox.SelectedCard{
-					Set:      a.selectedSet,
+					Set:      selectedSet,
 					Quantity: 0,
 					Number:   cardNum,
 					Foil:     foil,
 				}
 
 				for i, c := range a.selectedCards {
-					if c.Set == a.selectedSet && c.Number == cardNum && c.Foil == foil {
+					if c.Set == selectedSet && c.Number == cardNum && c.Foil == foil {
 						sCard = c
 						index = i
 						break
@@ -202,6 +212,8 @@ func (a *app) start() error {
 				cardsTable.Select(index+1, 0)
 
 				cardField.SetText("")
+			} else {
+				a.beep(1)
 			}
 		}
 	})
