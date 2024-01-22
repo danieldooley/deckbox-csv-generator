@@ -493,7 +493,7 @@ func (a *app) GetCell(row, column int) *tview.TableCell {
 
 		price := ""
 
-		if card.Foil {
+		if sCard.Foil {
 			price = card.Prices.UsdFoil
 		} else {
 			price = card.Prices.Usd
