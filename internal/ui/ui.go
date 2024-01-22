@@ -14,14 +14,21 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"golang.design/x/clipboard"
 )
 
 const (
-	cardInputRegex = `^(?:([0-9a-z]{3})\.)?(\d+)(f?)$`
+	cardInputRegex      = `^(?:([0-9a-z]{3})\.)?(\d+)(f?)$`
+	moxfieldImportRegex = `^(\d+)\s+(.+)\s+\(([0-9A-Z]{3})\)\s(\d+)(\s\*F\*)?$`
+
+	mainPageName        = "main"
+	importModalPageName = "importModal"
 )
 
 var (
-	cardInputRegexEval = regexp.MustCompile(cardInputRegex)
+	cardInputRegexEval      = regexp.MustCompile(cardInputRegex)
+	moxfieldImportRegexEval = regexp.MustCompile(moxfieldImportRegex)
 )
 
 func Start(filepath string, store data.Store) error {
@@ -68,6 +75,13 @@ func Start(filepath string, store data.Store) error {
 	return a.start()
 }
 
+type cardMatch struct {
+	count   int
+	cardSet string
+	cardNum string
+	foil    bool
+}
+
 type app struct {
 	store data.Store
 
@@ -81,7 +95,13 @@ type app struct {
 }
 
 func (a *app) start() error {
+	err := clipboard.Init()
+	if err != nil {
+		return fmt.Errorf("failed to init clipboard: %w", err)
+	}
+
 	tviewApp := tview.NewApplication()
+	pages := tview.NewPages()
 
 	/*
 		Card Table
@@ -146,67 +166,16 @@ func (a *app) start() error {
 				cardNum := matches[2]
 				foil := matches[3] == "f"
 
-				// Trim leading zeroes from the card number
-				cardNum = strings.TrimLeft(cardNum, "0")
+				index, err := a.AddCard(cardMatch{
+					count:   1,
+					cardSet: cardSet,
+					cardNum: cardNum,
+					foil:    foil,
+				})
 
-				// Prefer the set code from the card input
-				selectedSet := a.selectedSet
-				if cardSet != "" {
-					selectedSet = cardSet
-				}
-
-				card, ok := a.store.SetCards[selectedSet][cardNum]
-				if !ok {
+				if err != nil {
 					a.beep(1)
 					return
-				}
-
-				if foil && !card.Foil || !foil && !card.Nonfoil {
-					a.beep(1)
-					return
-				}
-
-				var price string
-				if foil {
-					price = card.Prices.UsdFoil
-				} else {
-					price = card.Prices.Usd
-				}
-
-				// Notify if price above threshold
-				priceF, err := strconv.ParseFloat(price, 64)
-				if err == nil {
-					if priceF > 10 {
-						a.beep(3)
-					} else if priceF > 2.5 {
-						a.beep(2)
-					}
-				}
-
-				// Find if card has already been added
-				index := -1
-				sCard := deckbox.SelectedCard{
-					Set:      selectedSet,
-					Quantity: 0,
-					Number:   cardNum,
-					Foil:     foil,
-				}
-
-				for i, c := range a.selectedCards {
-					if c.Set == selectedSet && c.Number == cardNum && c.Foil == foil {
-						sCard = c
-						index = i
-						break
-					}
-				}
-
-				sCard.Quantity += 1
-
-				if index == -1 {
-					a.selectedCards = append(a.selectedCards, sCard)
-					index = len(a.selectedCards) - 1
-				} else {
-					a.selectedCards[index] = sCard
 				}
 
 				cardsTable.Select(index+1, 0)
@@ -251,26 +220,109 @@ func (a *app) start() error {
 	setSelector.AddItem(setField, 0, 1, true)
 
 	/*
-		Root
+		Import Modal
 	*/
 
-	root := tview.NewFlex()
-	root.SetBorder(true).SetTitle("deckbox-csv-generator")
+	importField := tview.NewTextArea()
 
-	root.SetDirection(tview.FlexRow)
+	importFlex := tview.NewFlex().AddItem(importField, 0, 1, false)
 
-	root.AddItem(tview.NewFlex().
+	importFrame := tview.NewFrame(importFlex).
+		SetBorders(0, 0, 0, 1, 0, 0).
+		AddText("P: Paste - I: Import Moxfield - X: Cancel", false, tview.AlignCenter, tcell.ColorYellow)
+
+	importFrame.SetBorder(true).SetTitle("Import")
+
+	importFlex.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		switch event.Rune() {
+		case 'P':
+			importField.SetText(string(clipboard.Read(clipboard.FmtText)), true)
+			return nil
+		case 'I':
+			lines := strings.Split(strings.ReplaceAll(importField.GetText(), "\r\n", "\n"), "\n")
+
+			cardsToAdd := make([]cardMatch, 0, len(lines))
+
+			for i, l := range lines {
+				match := moxfieldImportRegexEval.FindStringSubmatch(l)
+
+				if len(match) == 5 || len(match) == 6 {
+					count, err := strconv.Atoi(match[1])
+					if err != nil {
+						a.beep(1)
+						errIdx := mapTextAreaCoord(importField, i, 0)
+						importField.Select(errIdx, errIdx)
+						return nil
+					}
+					// match[2] is card name which we don't need/want
+					cardSet := match[3]
+					cardNumber := match[4]
+					foil := false
+
+					if len(match) == 6 {
+						foil = len(match[5]) > 0
+					}
+
+					cardsToAdd = append(cardsToAdd, cardMatch{
+						count:   count,
+						cardSet: cardSet,
+						cardNum: cardNumber,
+						foil:    foil,
+					})
+				} else {
+					a.beep(1)
+					errIdx := mapTextAreaCoord(importField, i, 0)
+					importField.Select(errIdx, errIdx)
+					return nil
+				}
+			}
+
+			for _, cm := range cardsToAdd {
+				_, err := a.AddCard(cm)
+				if err != nil {
+					fmt.Print(err)
+					a.beep(1)
+					break
+				}
+			}
+
+			importField.SetText("", true)
+			pages.HidePage(importModalPageName)
+			tviewApp.SetFocus(cardsTable)
+			cardsTable.Select(len(a.selectedCards), 0)
+
+			return nil
+		case 'X':
+			pages.HidePage(importModalPageName)
+			return nil
+		default:
+			return event
+		}
+	})
+
+	importModal := a.Modal(importFrame, 5, 5)
+
+	/*
+		Main page
+	*/
+
+	mainFlex := tview.NewFlex()
+	mainFlex.SetBorder(true).SetTitle("deckbox-csv-generator")
+
+	mainFlex.SetDirection(tview.FlexRow)
+
+	mainFlex.AddItem(tview.NewFlex().
 		AddItem(setSelector, 0, 1, true).
 		AddItem(cardInput, 0, 1, false),
 		0, 1, true)
 
-	root.AddItem(tableFrame, 0, 10, false)
+	mainFlex.AddItem(tableFrame, 0, 10, false)
 
-	frame := tview.NewFrame(root).
+	mainFrame := tview.NewFrame(mainFlex).
 		SetBorders(0, 0, 0, 1, 0, 0).
-		AddText("S: Select Set - A: Add Cards - T: Selected Cards - X: Export", false, tview.AlignCenter, tcell.ColorYellow)
+		AddText("S: Select Set - A: Add Cards - T: Selected Cards - X: Export - I: Import", false, tview.AlignCenter, tcell.ColorYellow)
 
-	root.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+	mainFlex.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		switch event.Rune() {
 		case 'S':
 			tviewApp.SetFocus(setSelector)
@@ -288,14 +340,135 @@ func (a *app) start() error {
 			}
 			a.beep(2)
 			return nil
+		case 'I':
+			pages.ShowPage(importModalPageName)
+			tviewApp.SetFocus(importFrame)
+			return nil
 		default:
 			return event
 		}
 	})
 
-	return tviewApp.SetRoot(frame, true).Run()
+	/*
+		Pages
+	*/
+
+	pages.AddPage(mainPageName, mainFrame, true, true)
+	pages.AddPage(importModalPageName, importModal, true, false)
+
+	return tviewApp.SetRoot(pages, true).Run()
 }
 
+func (a *app) AddCard(cm cardMatch) (int, error) {
+	// Trim leading zeroes from the card number
+	cardNum := strings.TrimLeft(cm.cardNum, "0")
+
+	// Prefer the set code from the card input
+	selectedSet := a.selectedSet
+	if cm.cardSet != "" {
+		selectedSet = strings.ToLower(cm.cardSet)
+	}
+
+	card, ok := a.store.SetCards[selectedSet][cardNum]
+	if !ok {
+		a.beep(1)
+		return 0, fmt.Errorf("SetCards did not contain %s - %s", selectedSet, cardNum)
+	}
+
+	if cm.foil && !card.Foil || !cm.foil && !card.Nonfoil {
+		a.beep(1)
+		return 0, fmt.Errorf("foil value '%v' is not valid for %s - %s", cm.foil, selectedSet, cardNum)
+	}
+
+	var price string
+	if cm.foil {
+		price = card.Prices.UsdFoil
+	} else {
+		price = card.Prices.Usd
+	}
+
+	// Notify if price above threshold
+	priceF, err := strconv.ParseFloat(price, 64)
+	if err == nil {
+		if priceF > 10 {
+			a.beep(3)
+		} else if priceF > 2.5 {
+			a.beep(2)
+		}
+	}
+
+	// Find if card has already been added
+	index := -1
+	sCard := deckbox.SelectedCard{
+		Set:      selectedSet,
+		Quantity: 0,
+		Number:   cardNum,
+		Foil:     cm.foil,
+	}
+
+	for i, c := range a.selectedCards {
+		if c.Set == selectedSet && c.Number == cardNum && c.Foil == cm.foil {
+			sCard = c
+			index = i
+			break
+		}
+	}
+
+	sCard.Quantity += cm.count
+
+	if index == -1 {
+		a.selectedCards = append(a.selectedCards, sCard)
+		index = len(a.selectedCards) - 1
+	} else {
+		a.selectedCards[index] = sCard
+	}
+
+	return index, nil
+}
+
+/*
+Util method to put a UI component in a modal
+width/height params are a proprotion, where the borders are proprotion 1
+*/
+func (a *app) Modal(p tview.Primitive, width, height int) tview.Primitive {
+	return tview.NewFlex().
+		AddItem(nil, 0, 1, false).
+		AddItem(
+			tview.NewFlex().SetDirection(tview.FlexRow).
+				AddItem(nil, 0, 1, false).
+				AddItem(p, 0, width, false).
+				AddItem(nil, 0, 1, false),
+			0, height, false).
+		AddItem(nil, 0, 1, false)
+}
+
+/*
+Util Method that converts a row/col to an index for a TextArea
+*/
+func mapTextAreaCoord(ta *tview.TextArea, row, col int) int {
+	lines := strings.Split(strings.ReplaceAll(ta.GetText(), "\r\n", "\n"), "\n")
+
+	if row >= len(lines) {
+		return -1
+	}
+
+	count := 0
+	i := 0
+
+	for i = 0; i < row; i++ {
+		count += len(lines[i])
+	}
+
+	if col > len(lines[i]) {
+		return -1
+	}
+
+	return count + col
+}
+
+/*
+Methods that make app implement a Table
+*/
 func (a *app) GetCell(row, column int) *tview.TableCell {
 	if row == 0 { // Header row
 		switch column {
