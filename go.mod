@@ -3,6 +3,7 @@ module mtg-bulk-input
 go 1.19
 
 require (
+	github.com/dghubble/trie v0.0.0-20230729160116-2bc358f28a8b
 	github.com/gdamore/tcell/v2 v2.5.3
 	github.com/rivo/tview v0.0.0-20230104153304-892d1a2eb0da
 	golang.design/x/clipboard v0.7.0

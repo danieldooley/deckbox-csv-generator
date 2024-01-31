@@ -8,6 +8,7 @@ import (
 	"github.com/rivo/tview"
 	"mtg-bulk-input/internal/data"
 	"mtg-bulk-input/internal/deckbox"
+	"mtg-bulk-input/internal/scryfall"
 	"os"
 	"regexp"
 	"sort"
@@ -24,6 +25,7 @@ const (
 
 	mainPageName        = "main"
 	importModalPageName = "importModal"
+	quickSearchPageName = "quickSearch"
 )
 
 var (
@@ -54,6 +56,8 @@ func Start(filepath string, store data.Store) error {
 		autosaveTimer: time.NewTicker(time.Second * 10),
 
 		selectedCards: selCards,
+
+		quickSearchCardsList: make([]scryfall.Card, 0),
 	}
 
 	go func() {
@@ -92,6 +96,8 @@ type app struct {
 	autosaveTimer *time.Ticker
 
 	filepath string
+
+	quickSearchCardsList []scryfall.Card
 }
 
 func (a *app) start() error {
@@ -139,7 +145,7 @@ func (a *app) start() error {
 		return event
 	})
 
-	cardsTable.SetContent(a)
+	cardsTable.SetContent(&selectedCardTable{app: a})
 
 	tableFrame := tview.NewFrame(cardsTable)
 	tableFrame.SetBorders(0, 0, 0, 1, 0, 0)
@@ -303,6 +309,45 @@ func (a *app) start() error {
 	importModal := a.Modal(importFrame, 5, 5)
 
 	/*
+		QuickSearch Modal
+	*/
+
+	quickSearchTableComponent := tview.NewTable()
+	quickSearchTableComponent.SetContent(&quickSearchTable{app: a})
+
+	quickSearchField := tview.NewInputField()
+	quickSearchField.SetLabel("Card Name: ")
+
+	quickSearchField.SetChangedFunc(func(text string) {
+		a.quickSearchCardsList = a.store.Index.Search(text)
+	})
+
+	quickSearchFlex := tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(quickSearchField, 0, 1, true).
+		AddItem(quickSearchTableComponent, 0, 10, false)
+
+	quickSearchFlex.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		switch event.Rune() {
+		case 'C':
+			quickSearchField.SetText("")
+			return nil
+		case 'X':
+			quickSearchField.SetText("")
+			pages.HidePage(quickSearchPageName)
+			return nil
+		default:
+			return event
+		}
+	})
+
+	quickSearchFrame := tview.NewFrame(quickSearchFlex).
+		SetBorders(0, 0, 0, 1, 0, 0).
+		AddText("C: Clear - X: Close", false, tview.AlignCenter, tcell.ColorYellow)
+	quickSearchFrame.SetBorder(true).SetTitle("Quick Search")
+
+	quickSearchModal := a.Modal(quickSearchFrame, 5, 5)
+
+	/*
 		Main page
 	*/
 
@@ -320,7 +365,7 @@ func (a *app) start() error {
 
 	mainFrame := tview.NewFrame(mainFlex).
 		SetBorders(0, 0, 0, 1, 0, 0).
-		AddText("S: Select Set - A: Add Cards - T: Selected Cards - X: Export - I: Import", false, tview.AlignCenter, tcell.ColorYellow)
+		AddText("S: Select Set - A: Add Cards - T: Selected Cards - X: Export - I: Import - Q: Quick Search", false, tview.AlignCenter, tcell.ColorYellow)
 
 	mainFlex.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		switch event.Rune() {
@@ -344,6 +389,10 @@ func (a *app) start() error {
 			pages.ShowPage(importModalPageName)
 			tviewApp.SetFocus(importFrame)
 			return nil
+		case 'Q':
+			pages.ShowPage(quickSearchPageName)
+			tviewApp.SetFocus(quickSearchFrame)
+			return nil
 		default:
 			return event
 		}
@@ -355,6 +404,7 @@ func (a *app) start() error {
 
 	pages.AddPage(mainPageName, mainFrame, true, true)
 	pages.AddPage(importModalPageName, importModal, true, false)
+	pages.AddPage(quickSearchPageName, quickSearchModal, true, false)
 
 	return tviewApp.SetRoot(pages, true).Run()
 }
@@ -466,10 +516,122 @@ func mapTextAreaCoord(ta *tview.TextArea, row, col int) int {
 	return count + col
 }
 
-/*
-Methods that make app implement a Table
-*/
-func (a *app) GetCell(row, column int) *tview.TableCell {
+type quickSearchTable struct {
+	app *app
+}
+
+func (qst *quickSearchTable) GetCell(row, column int) *tview.TableCell {
+	if row == 0 { // Header row
+		switch column {
+		case 0:
+			return tview.NewTableCell("Name").SetTextColor(tcell.ColorYellow)
+		case 1:
+			return tview.NewTableCell("Set").SetTextColor(tcell.ColorYellow)
+		case 2:
+			return tview.NewTableCell("Number").SetTextColor(tcell.ColorYellow)
+		case 3:
+			return tview.NewTableCell("Price").SetTextColor(tcell.ColorYellow)
+		case 4:
+			return tview.NewTableCell("Foil Price").SetTextColor(tcell.ColorYellow)
+		default:
+			return nil
+		}
+	} else {
+		card := qst.app.quickSearchCardsList[row-1]
+
+		price := ""
+		foilPrice := ""
+
+		color := tcell.ColorWhite
+		foilColor := tcell.ColorWhite
+
+		if card.Nonfoil {
+			price = card.Prices.Usd
+
+			priceF, err := strconv.ParseFloat(price, 64)
+			if err == nil {
+				if priceF > 10 {
+					color = tcell.ColorRed
+				} else if priceF > 2.5 {
+					color = tcell.ColorOrange
+				}
+			}
+		}
+		if card.Foil {
+			foilPrice = card.Prices.UsdFoil
+
+			priceF, err := strconv.ParseFloat(foilPrice, 64)
+			if err == nil {
+				if priceF > 10 {
+					foilColor = tcell.ColorRed
+				} else if priceF > 2.5 {
+					foilColor = tcell.ColorOrange
+				}
+			}
+		}
+
+		switch column {
+		case 0:
+			return tview.NewTableCell(card.Name)
+		case 1:
+			return tview.NewTableCell(card.SetName)
+		case 2:
+			return tview.NewTableCell(card.CollectorNumber)
+		case 3:
+			return tview.NewTableCell(price).SetTextColor(color)
+		case 4:
+			return tview.NewTableCell(foilPrice).SetTextColor(foilColor)
+		}
+
+		return tview.NewTableCell("")
+	}
+}
+
+func (qst *quickSearchTable) GetRowCount() int {
+	return len(qst.app.quickSearchCardsList) + 1 // Number of cards plus header row
+}
+
+func (qst *quickSearchTable) GetColumnCount() int {
+	/*
+		Columns are:
+		- Card Name
+		- Set
+		- Collector Number
+		- Price
+		- Foil Price
+	*/
+	return 5
+}
+
+func (qst *quickSearchTable) SetCell(row, column int, cell *tview.TableCell) {
+	// Not a function
+}
+
+func (qst *quickSearchTable) RemoveRow(row int) {
+	// Not a function
+}
+
+func (qst *quickSearchTable) RemoveColumn(column int) {
+	// Not a function
+}
+
+func (qst *quickSearchTable) InsertRow(row int) {
+	// Not a function
+}
+
+func (qst *quickSearchTable) InsertColumn(column int) {
+	// Not a function
+}
+
+func (qst *quickSearchTable) Clear() {
+	// Not a function
+}
+
+type selectedCardTable struct {
+	app *app
+}
+
+func (sct *selectedCardTable) GetCell(row, column int) *tview.TableCell {
 	if row == 0 { // Header row
 		switch column {
 		case 0:
@@ -488,8 +650,8 @@ func (a *app) GetCell(row, column int) *tview.TableCell {
 			return nil
 		}
 	} else {
-		sCard := a.selectedCards[row-1]
-		card := a.store.SetCards[sCard.Set][sCard.Number]
+		sCard := sct.app.selectedCards[row-1]
+		card := sct.app.store.SetCards[sCard.Set][sCard.Number]
 
 		price := ""
 
@@ -530,11 +692,11 @@ func (a *app) GetCell(row, column int) *tview.TableCell {
 	}
 }
 
-func (a *app) GetRowCount() int {
-	return len(a.selectedCards) + 1 // 1 row per card plus a header row
+func (sct *selectedCardTable) GetRowCount() int {
+	return len(sct.app.selectedCards) + 1 // 1 row per card plus a header row
 }
 
-func (a *app) GetColumnCount() int {
+func (sct *selectedCardTable) GetColumnCount() int {
 	/*
 		Columns are:
 		* Quantity - int
@@ -547,29 +709,29 @@ func (a *app) GetColumnCount() int {
 	return 6
 }
 
-func (a *app) SetCell(row, column int, cell *tview.TableCell) {
+func (sct *selectedCardTable) SetCell(row, column int, cell *tview.TableCell) {
 	// Not a function
 }
 
-func (a *app) RemoveRow(row int) {
+func (sct *selectedCardTable) RemoveRow(row int) {
 	if row > 0 { // Can't remove header
-		a.selectedCards = append(a.selectedCards[:row-1], a.selectedCards[row:]...)
+		sct.app.selectedCards = append(sct.app.selectedCards[:row-1], sct.app.selectedCards[row:]...)
 	}
 }
 
-func (a *app) RemoveColumn(column int) {
+func (sct *selectedCardTable) RemoveColumn(column int) {
 	// Not a function
 }
 
-func (a *app) InsertRow(row int) {
+func (sct *selectedCardTable) InsertRow(row int) {
 	// Not a function
 }
 
-func (a *app) InsertColumn(column int) {
+func (sct *selectedCardTable) InsertColumn(column int) {
 	// Not a function
 }
 
-func (a *app) Clear() {
+func (sct *selectedCardTable) Clear() {
 	// Not a function // TODO: Or is it?
 }
 

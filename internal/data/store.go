@@ -13,12 +13,15 @@ type Store struct {
 
 	// SetCards is keyed: Card.Set -> Card.CollectorNumber
 	SetCards map[string]map[string]scryfall.Card
+
+	Index CardIndex
 }
 
 func BuildDataStore() (Store, error) {
 	out := Store{
 		Sets:     make(map[string]string),
 		SetCards: make(map[string]map[string]scryfall.Card),
+		Index:    NewCardIndex(),
 	}
 
 	p := path.Join(WorkingDirectory, BulkDataDirectory, "default_cards.json")
@@ -48,6 +51,8 @@ func BuildDataStore() (Store, error) {
 				set[c.CollectorNumber] = c
 
 				out.SetCards[c.Set] = set
+
+				out.Index.Add(c)
 			} else {
 				moreCards = false
 			}
@@ -55,6 +60,8 @@ func BuildDataStore() (Store, error) {
 			return out, fmt.Errorf("json stream failed: %w", err)
 		}
 	}
+
+	out.Index.Sort()
 
 	return out, nil
 }
